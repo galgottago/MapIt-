@@ -1,0 +1,6 @@
+{
+  "name": "Blueprint 3D",
+  "description": "Interactive 3D blueprint model viewer with HUD wayfinding, equipment tracking, camera inspections, and 3D markup tools.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
