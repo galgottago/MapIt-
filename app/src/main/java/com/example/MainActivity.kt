@@ -1,6 +1,7 @@
 package com.example
 
 import android.os.Bundle
+import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -8,6 +9,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -31,6 +33,7 @@ import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.ViewInAr
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.material3.Badge
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -48,6 +51,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -56,8 +60,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isMetaPressed
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -70,6 +84,8 @@ import com.example.ui.BlueprintViewModel
 import com.example.ui.ToolMode
 import com.example.ui.blueprint.BlueprintCanvasView
 import com.example.ui.blueprint.BlueprintToolbar
+import com.example.ui.blueprint.DrawingShortcut
+import com.example.ui.blueprint.drawingShortcut
 import com.example.ui.camera.CameraInspectionScreen
 import com.example.ui.dialogs.Add3DTextDialog
 import com.example.ui.dialogs.AddEquipmentDialog
@@ -84,6 +100,30 @@ import com.example.ui.theme.BlueprintTheme
 class MainActivity : ComponentActivity() {
 
     private val viewModel: BlueprintViewModel by viewModels()
+
+    /** True while a text field or dialog should keep its own undo. */
+    @Volatile
+    private var drawingShortcutsBlocked = false
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (event.repeatCount == 0 && handleDrawingShortcut(keyCode, event)) return true
+        return super.onKeyDown(keyCode, event)
+    }
+
+    private fun handleDrawingShortcut(keyCode: Int, event: KeyEvent): Boolean {
+        if (drawingShortcutsBlocked) return false
+        val action = drawingShortcut(
+            ctrlOrMeta = event.isCtrlPressed || event.isMetaPressed,
+            shift = event.isShiftPressed,
+            isZ = keyCode == KeyEvent.KEYCODE_Z,
+            isY = keyCode == KeyEvent.KEYCODE_Y
+        ) ?: return false
+        when (action) {
+            DrawingShortcut.Undo -> viewModel.undoDrawing()
+            DrawingShortcut.Redo -> viewModel.redoDrawing()
+        }
+        return true
+    }
 
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -110,11 +150,27 @@ class MainActivity : ComponentActivity() {
             val selectedRoom by viewModel.selectedRoom.collectAsState()
             val selectedEquipment by viewModel.selectedEquipment.collectAsState()
             val gpsActive by viewModel.gpsActive.collectAsState()
+            val canUndoDrawing by viewModel.canUndoDrawing.collectAsState()
+            val canRedoDrawing by viewModel.canRedoDrawing.collectAsState()
 
             var showProjectDialog by remember { mutableStateOf(false) }
             var showAdd3DTextDialog by remember { mutableStateOf(false) }
             var textPlacementOffset by remember { mutableStateOf(Offset(0.5f, 0.5f)) }
             var showAddEquipmentDialog by remember { mutableStateOf(false) }
+            var searchFocused by remember { mutableStateOf(false) }
+            var clearConfirmVisible by remember { mutableStateOf(false) }
+            val shortcutFocus = remember { FocusRequester() }
+            val blockDrawingShortcuts = searchFocused || clearConfirmVisible || showProjectDialog ||
+                showAdd3DTextDialog || showAddEquipmentDialog || selectedRoom != null ||
+                selectedEquipment != null || currentTab != AppTab.BLUEPRINT_3D
+
+            SideEffect { drawingShortcutsBlocked = blockDrawingShortcuts }
+
+            LaunchedEffect(currentTab, blockDrawingShortcuts) {
+                if (!blockDrawingShortcuts) {
+                    runCatching { shortcutFocus.requestFocus() }
+                }
+            }
 
             // Back handler: if immersed in room, exit immersion; if navigating, clear navigation; if on other tab, return to 3D map
             BackHandler(enabled = camera.isImmersiveMode || navTarget != null || currentTab != AppTab.BLUEPRINT_3D) {
@@ -128,7 +184,35 @@ class MainActivity : ComponentActivity() {
             }
 
             BlueprintTheme(darkTheme = isDarkTheme) {
-                BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                BoxWithConstraints(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .focusRequester(shortcutFocus)
+                        .focusable()
+                        .onPreviewKeyEvent { event ->
+                            if (event.type != KeyEventType.KeyDown || blockDrawingShortcuts) {
+                                return@onPreviewKeyEvent false
+                            }
+                            when (
+                                drawingShortcut(
+                                    ctrlOrMeta = event.isCtrlPressed || event.isMetaPressed,
+                                    shift = event.isShiftPressed,
+                                    isZ = event.key == Key.Z,
+                                    isY = event.key == Key.Y
+                                )
+                            ) {
+                                DrawingShortcut.Undo -> {
+                                    viewModel.undoDrawing()
+                                    true
+                                }
+                                DrawingShortcut.Redo -> {
+                                    viewModel.redoDrawing()
+                                    true
+                                }
+                                null -> false
+                            }
+                        }
+                ) {
                     val isFoldableExpanded = maxWidth >= 600.dp
 
                     Scaffold(
@@ -408,7 +492,14 @@ class MainActivity : ComponentActivity() {
                                         onSetTool = { tool -> viewModel.setTool(tool) },
                                         onSetColor = { color -> viewModel.setColor(color) },
                                         onResetCamera = { viewModel.resetCamera() },
+                                        canUndo = canUndoDrawing,
+                                        canRedo = canRedoDrawing,
+                                        canClearDrawing = annotations.isNotEmpty(),
+                                        onUndo = { viewModel.undoDrawing() },
+                                        onRedo = { viewModel.redoDrawing() },
                                         onClearAnnotations = { viewModel.clearAllAnnotations() },
+                                        onSearchFocusChanged = { searchFocused = it },
+                                        onClearConfirmVisible = { clearConfirmVisible = it },
                                         onSearchDestination = { query ->
                                             viewModel.searchAndNavigate(query)
                                         },
