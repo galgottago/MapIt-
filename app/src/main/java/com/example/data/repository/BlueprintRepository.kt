@@ -86,6 +86,10 @@ class BlueprintRepository(
         dao.deleteEquipment(equipment)
     }
 
+    suspend fun getAnnotationsNow(projectId: String): List<AnnotationEntity> = withContext(Dispatchers.IO) {
+        dao.getAnnotationsByProjectSync(projectId)
+    }
+
     suspend fun addAnnotation(annotation: AnnotationEntity) = withContext(Dispatchers.IO) {
         dao.insertAnnotation(annotation)
     }
