@@ -75,6 +75,9 @@ interface BlueprintDao {
     @Query("SELECT * FROM annotations WHERE projectId = :projectId ORDER BY createdAt ASC")
     fun getAnnotationsByProject(projectId: String): Flow<List<AnnotationEntity>>
 
+    @Query("SELECT * FROM annotations WHERE projectId = :projectId ORDER BY createdAt ASC")
+    suspend fun getAnnotationsByProjectSync(projectId: String): List<AnnotationEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAnnotation(annotation: AnnotationEntity)
 

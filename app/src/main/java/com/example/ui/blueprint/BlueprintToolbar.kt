@@ -6,6 +6,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,11 +18,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Redo
+import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.filled.CenterFocusWeak
 import androidx.compose.material.icons.filled.Clear
@@ -37,6 +41,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.ViewInAr
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -49,6 +54,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -57,6 +63,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
@@ -77,15 +84,23 @@ fun BlueprintToolbar(
     onSetTool: (ToolMode) -> Unit,
     onSetColor: (Long) -> Unit,
     onResetCamera: () -> Unit,
+    canUndo: Boolean,
+    canRedo: Boolean,
+    canClearDrawing: Boolean,
+    onUndo: () -> Unit,
+    onRedo: () -> Unit,
     onClearAnnotations: () -> Unit,
     onSearchDestination: (String) -> Boolean,
     onRelocateUser: () -> Unit,
     onOpenArScanner: () -> Unit = {},
+    onSearchFocusChanged: (Boolean) -> Unit = {},
+    onClearConfirmVisible: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var searchQuery by remember { mutableStateOf("") }
     var searchError by remember { mutableStateOf(false) }
     var showColorPicker by remember { mutableStateOf(false) }
+    var showClearConfirm by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
 
     val colors = listOf(
@@ -154,6 +169,7 @@ fun BlueprintToolbar(
                     ),
                     modifier = Modifier
                         .weight(1f)
+                        .onFocusChanged { onSearchFocusChanged(it.isFocused) }
                         .testTag("blueprint_search_input")
                 )
 
@@ -218,8 +234,7 @@ fun BlueprintToolbar(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 8.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 // 2D / 3D Mode Switcher
                 FilterChip(
@@ -246,8 +261,13 @@ fun BlueprintToolbar(
                     modifier = Modifier.testTag("toggle_2d_3d_chip")
                 )
 
-                // Tool Buttons
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                // Tool Buttons scroll when the bar is narrow so history stays on screen
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .horizontalScroll(rememberScrollState()),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     // Navigate / Pan
                     ToolIconButton(
                         icon = Icons.Default.Navigation,
@@ -340,6 +360,40 @@ fun BlueprintToolbar(
                         )
                     }
                 }
+
+                Box(
+                    modifier = Modifier
+                        .padding(horizontal = 4.dp)
+                        .width(1.dp)
+                        .height(22.dp)
+                        .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.18f))
+                )
+
+                HistoryIconButton(
+                    icon = Icons.AutoMirrored.Filled.Undo,
+                    contentDesc = "Undo",
+                    enabled = canUndo,
+                    onClick = onUndo,
+                    testTag = "tool_undo"
+                )
+                HistoryIconButton(
+                    icon = Icons.AutoMirrored.Filled.Redo,
+                    contentDesc = "Redo",
+                    enabled = canRedo,
+                    onClick = onRedo,
+                    testTag = "tool_redo"
+                )
+                HistoryIconButton(
+                    icon = Icons.Default.DeleteSweep,
+                    contentDesc = "Clear drawing",
+                    enabled = canClearDrawing,
+                    tint = if (canClearDrawing) MaterialTheme.colorScheme.error else null,
+                    onClick = {
+                        showClearConfirm = true
+                        onClearConfirmVisible(true)
+                    },
+                    testTag = "tool_clear_drawing"
+                )
             }
         }
 
@@ -382,10 +436,14 @@ fun BlueprintToolbar(
 
                     IconButton(
                         onClick = {
-                            onClearAnnotations()
+                            showClearConfirm = true
+                            onClearConfirmVisible(true)
                             showColorPicker = false
                         },
-                        modifier = Modifier.size(28.dp)
+                        enabled = canClearDrawing,
+                        modifier = Modifier
+                            .size(28.dp)
+                            .testTag("tool_clear_drawing_palette")
                     ) {
                         Icon(
                             imageVector = Icons.Default.DeleteSweep,
@@ -397,6 +455,71 @@ fun BlueprintToolbar(
                 }
             }
         }
+
+        if (showClearConfirm) {
+            AlertDialog(
+                onDismissRequest = {
+                    showClearConfirm = false
+                    onClearConfirmVisible(false)
+                },
+                title = { Text("Clear drawing?") },
+                text = {
+                    Text("Remove every markup on this blueprint, including strokes, highlights, and pins. You can undo this afterward.")
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            showClearConfirm = false
+                            onClearConfirmVisible(false)
+                            onClearAnnotations()
+                        },
+                        modifier = Modifier.testTag("clear_drawing_confirm")
+                    ) {
+                        Text("Clear drawing")
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = {
+                            showClearConfirm = false
+                            onClearConfirmVisible(false)
+                        },
+                        modifier = Modifier.testTag("clear_drawing_cancel")
+                    ) {
+                        Text("Cancel")
+                    }
+                }
+            )
+        }
+    }
+}
+
+@Composable
+private fun HistoryIconButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDesc: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    testTag: String,
+    tint: Color? = null
+) {
+    IconButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier
+            .size(34.dp)
+            .testTag(testTag)
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDesc,
+            tint = tint ?: if (enabled) {
+                MaterialTheme.colorScheme.onSurface
+            } else {
+                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+            },
+            modifier = Modifier.size(18.dp)
+        )
     }
 }
 

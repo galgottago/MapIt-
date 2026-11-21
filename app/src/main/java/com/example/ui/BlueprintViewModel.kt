@@ -18,6 +18,10 @@ import com.example.data.repository.BlueprintRepository
 import com.example.engine3d.Camera3D
 import com.example.engine3d.Pathfinding3D
 import com.example.engine3d.Point3D
+import com.example.ui.blueprint.DrawingEffect
+import com.example.ui.blueprint.DrawingHistory
+import com.example.ui.blueprint.DrawingOp
+import com.example.ui.blueprint.effects
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -29,6 +33,8 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
@@ -356,18 +362,16 @@ class BlueprintViewModel(application: Application) : AndroidViewModel(applicatio
                 jsonArray.put(obj)
             }
 
+            val projectId = _selectedProjectId.value
             val annotation = AnnotationEntity(
                 id = UUID.randomUUID().toString(),
-                projectId = _selectedProjectId.value,
+                projectId = projectId,
                 type = toolType,
                 color = _activeColor.value,
                 strokeWidth = strokeWidth,
                 pointsJson = jsonArray.toString()
             )
-
-            viewModelScope.launch {
-                repository.addAnnotation(annotation)
-            }
+            commitDrawing(projectId, DrawingOp.AddAnnotation(annotation))
         }
         currentStrokePoints.clear()
     }
@@ -375,9 +379,10 @@ class BlueprintViewModel(application: Application) : AndroidViewModel(applicatio
     // 3D Text Annotation
     fun add3DTextAnnotation(text: String, location: Offset) {
         if (text.isBlank()) return
+        val projectId = _selectedProjectId.value
         val annotation = AnnotationEntity(
             id = UUID.randomUUID().toString(),
-            projectId = _selectedProjectId.value,
+            projectId = projectId,
             type = "TEXT_3D",
             color = _activeColor.value,
             text = text,
@@ -385,17 +390,16 @@ class BlueprintViewModel(application: Application) : AndroidViewModel(applicatio
             posY = location.y,
             posZ = 15f // Elevation
         )
-        viewModelScope.launch {
-            repository.addAnnotation(annotation)
-        }
+        commitDrawing(projectId, DrawingOp.AddAnnotation(annotation))
     }
 
     // AR Live View Pushpin / Marker Annotation
     fun addArPushpin(text: String, posX: Float, posY: Float, color: Long) {
         if (text.isBlank()) return
+        val projectId = _selectedProjectId.value
         val annotation = AnnotationEntity(
             id = UUID.randomUUID().toString(),
-            projectId = _selectedProjectId.value,
+            projectId = projectId,
             type = "AR_PUSHPIN",
             color = color,
             text = text,
@@ -403,20 +407,96 @@ class BlueprintViewModel(application: Application) : AndroidViewModel(applicatio
             posY = posY,
             posZ = 0f
         )
-        viewModelScope.launch {
-            repository.addAnnotation(annotation)
-        }
+        commitDrawing(projectId, DrawingOp.AddAnnotation(annotation))
     }
 
     fun deleteAnnotation(annotation: AnnotationEntity) {
-        viewModelScope.launch {
-            repository.deleteAnnotation(annotation)
-        }
+        commitDrawing(annotation.projectId, DrawingOp.DeleteAnnotation(annotation))
     }
 
     fun clearAllAnnotations() {
+        val projectId = _selectedProjectId.value
         viewModelScope.launch {
-            repository.clearAnnotations(_selectedProjectId.value)
+            drawingMutex.withLock {
+                val existing = repository.getAnnotationsNow(projectId)
+                if (existing.isEmpty()) return@withLock
+                val op = DrawingOp.ClearAnnotations(projectId, existing)
+                historyFor(projectId).record(op)
+                applyEffects(op.effects(inverse = false))
+                publishHistoryFlags(projectId)
+            }
+        }
+    }
+
+    fun undoDrawing() {
+        replayDrawing(inverse = true)
+    }
+
+    fun redoDrawing() {
+        replayDrawing(inverse = false)
+    }
+
+    private val drawingMutex = Mutex()
+    private val drawingHistories = mutableMapOf<String, DrawingHistory>()
+
+    private val _canUndoDrawing = MutableStateFlow(false)
+    val canUndoDrawing: StateFlow<Boolean> = _canUndoDrawing.asStateFlow()
+
+    private val _canRedoDrawing = MutableStateFlow(false)
+    val canRedoDrawing: StateFlow<Boolean> = _canRedoDrawing.asStateFlow()
+
+    private fun historyFor(projectId: String): DrawingHistory =
+        drawingHistories.getOrPut(projectId) { DrawingHistory() }
+
+    private fun publishHistoryFlags(projectId: String) {
+        if (_selectedProjectId.value != projectId) return
+        val history = drawingHistories[projectId]
+        _canUndoDrawing.value = history?.canUndo == true
+        _canRedoDrawing.value = history?.canRedo == true
+    }
+
+    private fun commitDrawing(projectId: String, op: DrawingOp) {
+        viewModelScope.launch {
+            drawingMutex.withLock {
+                historyFor(projectId).record(op)
+                applyEffects(op.effects(inverse = false))
+                publishHistoryFlags(projectId)
+            }
+        }
+    }
+
+    private fun replayDrawing(inverse: Boolean) {
+        val projectId = _selectedProjectId.value
+        viewModelScope.launch {
+            drawingMutex.withLock {
+                val history = drawingHistories[projectId] ?: return@withLock
+                val op = if (inverse) history.popUndo() else history.popRedo()
+                if (op == null) return@withLock
+                applyEffects(op.effects(inverse))
+                publishHistoryFlags(projectId)
+            }
+        }
+    }
+
+    private suspend fun applyEffects(effects: List<DrawingEffect>) {
+        for (effect in effects) {
+            when (effect) {
+                is DrawingEffect.InsertAnnotation -> repository.addAnnotation(effect.annotation)
+                is DrawingEffect.RemoveAnnotation -> repository.deleteAnnotation(effect.annotation)
+                is DrawingEffect.ClearProjectAnnotations -> repository.clearAnnotations(effect.projectId)
+                is DrawingEffect.UpsertRoom -> {
+                    repository.updateRoom(effect.room)
+                    if (_selectedRoom.value?.id == effect.room.id) {
+                        _selectedRoom.value = effect.room
+                    }
+                }
+                is DrawingEffect.UpsertEquipment -> {
+                    repository.updateEquipment(effect.equipment)
+                    if (_selectedEquipment.value?.id == effect.equipment.id) {
+                        _selectedEquipment.value = effect.equipment
+                    }
+                }
+            }
         }
     }
 
@@ -436,12 +516,9 @@ class BlueprintViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun updateRoomLabel(room: RoomEntity, newName: String, newCode: String, newNotes: String) {
-        viewModelScope.launch {
-            repository.updateRoom(room.copy(name = newName, code = newCode, notes = newNotes))
-            if (_selectedRoom.value?.id == room.id) {
-                _selectedRoom.value = room.copy(name = newName, code = newCode, notes = newNotes)
-            }
-        }
+        val updated = room.copy(name = newName, code = newCode, notes = newNotes)
+        if (updated == room) return
+        commitDrawing(room.projectId, DrawingOp.EditRoom(before = room, after = updated))
     }
 
     fun updateEquipmentDetails(
@@ -452,20 +529,16 @@ class BlueprintViewModel(application: Application) : AndroidViewModel(applicatio
         newSpecs: String,
         newNotes: String
     ) {
-        viewModelScope.launch {
-            val updated = equipment.copy(
-                tag = newTag,
-                name = newName,
-                status = newStatus,
-                specifications = newSpecs,
-                notes = newNotes,
-                updatedAt = System.currentTimeMillis()
-            )
-            repository.updateEquipment(updated)
-            if (_selectedEquipment.value?.id == equipment.id) {
-                _selectedEquipment.value = updated
-            }
-        }
+        val updated = equipment.copy(
+            tag = newTag,
+            name = newName,
+            status = newStatus,
+            specifications = newSpecs,
+            notes = newNotes,
+            updatedAt = System.currentTimeMillis()
+        )
+        if (updated.copy(updatedAt = equipment.updatedAt) == equipment) return
+        commitDrawing(equipment.projectId, DrawingOp.EditEquipment(before = equipment, after = updated))
     }
 
     fun addEquipment(
@@ -551,6 +624,7 @@ class BlueprintViewModel(application: Application) : AndroidViewModel(applicatio
         currentStrokePoints.clear()
         _selectedRoom.value = null
         _selectedEquipment.value = null
+        publishHistoryFlags(projectId)
     }
 
     fun importPdfBlueprint(pdfUri: Uri, fileName: String) {
